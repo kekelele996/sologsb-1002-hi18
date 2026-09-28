@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type { Comment, EditConflict, Paragraph, Reply, Role, Version } from '../types'
+import { buildImportPlan, type ImportOutcome, type ReviewPack } from '../services/reviewPack'
 
 const DRAFT_KEY = 'sologsb-1002-draft-v1'
 const id = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
@@ -61,6 +62,7 @@ interface ReviewState {
   addConflict: (conflict: EditConflict) => void
   resolveConflict: (conflictId: string, strategy: 'local' | 'remote') => void
   dismissConflict: (conflictId: string) => void
+  importReviewPack: (pack: ReviewPack) => ImportOutcome
   undo: () => void
   redo: () => void
   save: () => void
@@ -148,6 +150,13 @@ export const useReviewStore = create<ReviewState>((set, get) => {
       }
     }),
     dismissConflict: (conflictId) => set((state) => ({ conflicts: state.conflicts.filter((item) => item.id !== conflictId) })),
+    importReviewPack: (pack) => {
+      const precheck = buildImportPlan({ paragraphs: get().paragraphs, comments: get().comments, versions: get().versions }, pack)
+      if (precheck.conflicts.length) return { ok: false, plan: precheck }
+      if (!precheck.added.length) return { ok: true, report: { added: [], skipped: precheck.skipped } }
+      record(() => ({ paragraphs: precheck.paragraphs, comments: precheck.comments, versions: precheck.versions }))
+      return { ok: true, report: { added: precheck.added, skipped: precheck.skipped } }
+    },
     undo: () => set((state) => {
       const previous = state.past.at(-1)
       if (!previous) return state

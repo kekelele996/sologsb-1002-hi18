@@ -1,14 +1,18 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   ArrowLeftOutlined, ArrowRightOutlined, BranchesOutlined, CheckOutlined, CloseOutlined,
-  CommentOutlined, DiffOutlined, DeleteOutlined, FileDoneOutlined, FileTextOutlined,
-  HistoryOutlined, LockOutlined, MenuFoldOutlined, MessageOutlined, PlusOutlined,
+  CommentOutlined, DiffOutlined, DeleteOutlined, ExportOutlined, FileDoneOutlined, FileTextOutlined,
+  HistoryOutlined, ImportOutlined, LockOutlined, MenuFoldOutlined, MessageOutlined, PlusOutlined,
   RedoOutlined, SaveOutlined, SendOutlined, SwapOutlined, UndoOutlined, UnlockOutlined, UserSwitchOutlined,
 } from '@ant-design/icons'
-import { Alert, Badge, Button, Card, Checkbox, Divider, Empty, Input, Modal, Radio, Segmented, Select, Space, Tag, Tooltip, message } from 'antd'
+import { Alert, Badge, Button, Card, Checkbox, Divider, Empty, Input, Modal, Radio, Segmented, Select, Space, Tag, Tooltip, Upload, message } from 'antd'
 import { submitRemotePatch } from './services/mockApi'
+import {
+  buildImportPlan, createReviewPack, kindLabel, parseReviewPack, PACKAGE_VERSION,
+  type ImportPlan, type ItemRef, type PackConflict, type ReviewPack, type SkippedItem,
+} from './services/reviewPack'
 import { useReviewStore } from './store/review'
-import type { Comment, CommentType, Paragraph, Role } from './types'
+import type { Comment, CommentType, Paragraph, Role, Version } from './types'
 
 const roleMeta: Record<Role, { label: string; description: string; color: string }> = {
   author: { label: '作者工作区', description: '编辑正文，逐条接受或拒绝修改建议', color: '#2f6f5e' },
@@ -18,12 +22,43 @@ const roleMeta: Record<Role, { label: string; description: string; color: string
 const roleIcon = (role: Role) => role === 'author' ? <FileDoneOutlined /> : role === 'reviewer' ? <CommentOutlined /> : <BranchesOutlined />
 const formatDate = (value: number) => new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
 
+const conflictMeta = (data: Paragraph | Comment | Version): { meta: string; body: string } => {
+  if ('section' in data && 'number' in data && 'original' in data) {
+    const paragraph = data as Paragraph
+    return { meta: `${paragraph.section} · 段落 ${paragraph.number} · 状态：${paragraph.status === 'locked' ? '已锁定' : paragraph.status === 'accepted' ? '已确认' : '待处理'}`, body: paragraph.text }
+  }
+  if ('paragraphId' in data && 'replies' in data) {
+    const comment = data as Comment
+    const statusText = comment.status === 'merged' ? `已合并到 ${comment.mergedInto ?? ''}` : comment.status === 'accepted' ? '已接受' : comment.status === 'rejected' ? '已拒绝' : '待处理'
+    const lines = [`【${comment.type === 'suggestion' ? '修改建议' : '段落批注'}】${comment.author} · ${statusText}`, `引用：${comment.quote}`, `意见：${comment.body}`]
+    if (comment.suggestion) lines.push(`建议改为：${comment.suggestion}`)
+    if (comment.replies.length) lines.push(`回复 ${comment.replies.length} 条：${comment.replies.map((reply) => `${reply.author}：${reply.body}`).join(' / ')}`)
+    return { meta: `所属段落 ${comment.paragraphId}`, body: lines.join('\n') }
+  }
+  const version = data as Version
+  return { meta: `保存于 ${formatDate(version.createdAt)} · 含 ${version.paragraphs.length} 段快照`, body: version.paragraphs.map((paragraph) => `${paragraph.number} ${paragraph.text}`).join('\n') }
+}
+
+function ConflictCompare({ conflict }: { conflict: PackConflict }) {
+  const local = conflictMeta(conflict.local)
+  const incoming = conflictMeta(conflict.incoming)
+  return (
+    <div className="pack-conflict-item">
+      <div className="pack-conflict-title"><Tag color="red">{kindLabel(conflict.kind)}编号 {conflict.id}</Tag><span>{conflict.label}</span></div>
+      <div className="conflict-content">
+        <div><b>本机已有</b><small>{local.meta}</small><p>{local.body}</p></div>
+        <div><b>审阅包中</b><small>{incoming.meta}</small><p>{incoming.body}</p></div>
+      </div>
+    </div>
+  )
+}
+
 export default function App() {
   const {
     role, paragraphs, comments, versions, selectedParagraphId, commentFilter, revisionMode, dirty, conflicts,
     setRole, selectParagraph, setCommentFilter, setRevisionMode, updateParagraph, addComment, replyComment,
     resolveSuggestion, mergeComment, toggleLock, createVersion, addConflict, resolveConflict, dismissConflict,
-    undo, redo, save, resetDemo,
+    undo, redo, save, resetDemo, importReviewPack,
   } = useReviewStore()
   const [composerOpen, setComposerOpen] = useState(false)
   const [commentType, setCommentType] = useState<CommentType>('comment')
@@ -35,6 +70,13 @@ export default function App() {
   const [versionA, setVersionA] = useState(versions[1]?.id ?? versions[0]?.id)
   const [versionB, setVersionB] = useState(versions[0]?.id)
   const [versionLabel, setVersionLabel] = useState('')
+  const [exportOpen, setExportOpen] = useState(false)
+  const [importOpen, setImportOpen] = useState(false)
+  const [importText, setImportText] = useState('')
+  const [importErrors, setImportErrors] = useState<string[]>([])
+  const [importPlan, setImportPlan] = useState<ImportPlan | null>(null)
+  const [importPack, setImportPack] = useState<ReviewPack | null>(null)
+  const [importResult, setImportResult] = useState<{ added: ItemRef[]; skipped: SkippedItem[] } | null>(null)
 
   const selected = paragraphs.find((paragraph) => paragraph.id === selectedParagraphId) ?? paragraphs[0]
   const sections = useMemo(() => Array.from(new Set(paragraphs.map((paragraph) => paragraph.section))), [paragraphs])
@@ -121,6 +163,72 @@ export default function App() {
   const comparedB = versions.find((version) => version.id === versionB)
   const comparedRows = comparedA && comparedB ? comparedA.paragraphs.map((paragraph, index) => ({ a: paragraph, b: comparedB.paragraphs[index] })) : []
 
+  const reviewPack = useMemo(() => createReviewPack({ paragraphs, comments, versions }), [paragraphs, comments, versions])
+  const reviewPackText = useMemo(() => JSON.stringify(reviewPack, null, 2), [reviewPack])
+
+  const openExport = () => setExportOpen(true)
+  const copyPack = async () => {
+    try {
+      await navigator.clipboard.writeText(reviewPackText)
+      message.success('审阅包已复制，粘贴到新电脑即可导入')
+    } catch {
+      message.error('浏览器未授权剪贴板，请手动选择文本框内容复制')
+    }
+  }
+  const downloadPack = () => {
+    const blob = new Blob([reviewPackText], { type: 'application/json;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `review-pack-v${PACKAGE_VERSION}-${new Date().toISOString().slice(0, 10)}.json`
+    link.click()
+    URL.revokeObjectURL(url)
+    message.success('审阅包文件已下载')
+  }
+
+  const resetImportFlow = () => {
+    setImportText(''); setImportErrors([]); setImportPlan(null); setImportPack(null); setImportResult(null)
+  }
+  const openImport = () => { resetImportFlow(); setImportOpen(true) }
+  const pickImportFile = (file: File) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const text = String(reader.result ?? '')
+      setImportText(text); setImportErrors([]); setImportPlan(null); setImportPack(null); setImportResult(null)
+    }
+    reader.onerror = () => message.error('读取文件失败，请重试')
+    reader.readAsText(file)
+    return false
+  }
+  const checkImport = () => {
+    if (!importText.trim()) { message.warning('请粘贴审阅包内容或选择 .json 文件'); return }
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(importText)
+    } catch {
+      setImportErrors(['JSON 解析失败，请确认复制完整或文件未损坏']); setImportPlan(null); return
+    }
+    const result = parseReviewPack(parsed)
+    if (!result.ok) { setImportErrors(result.errors); setImportPlan(null); return }
+    const state = useReviewStore.getState()
+    setImportPack(result.pack)
+    setImportPlan(buildImportPlan({ paragraphs: state.paragraphs, comments: state.comments, versions: state.versions }, result.pack))
+    setImportErrors([])
+    setImportResult(null)
+  }
+  const confirmImport = () => {
+    if (!importPack || !importPlan) return
+    const outcome = importReviewPack(importPack)
+    if (!outcome.ok) { setImportPlan(outcome.plan); return }
+    setImportResult(outcome.report)
+    setImportPlan(null)
+    setImportText('')
+    message.success(`导入完成：新增 ${outcome.report.added.length} 条，跳过 ${outcome.report.skipped.length} 条`)
+  }
+  const groupedItems = (items: ItemRef[]) => (['paragraph', 'comment', 'version'] as const).map((kind) => ({
+    kind, entries: items.filter((item) => item.kind === kind),
+  })).filter((group) => group.entries.length)
+
   return (
     <div className="review-app">
       <header className="app-header">
@@ -192,6 +300,12 @@ export default function App() {
           <div className="document-toolbar">
             <div><h2>大语言模型辅助下的开源维护协作研究</h2><p>作者：林晓、陈默、王远 · 最近保存 {formatDate(Date.now())}</p></div>
             <Space>
+              <Tooltip title="导出正文、意见、回复、合并关系与历史版本，用于换机或编辑交接">
+                <Button size="small" icon={<ExportOutlined />} onClick={openExport}>导出审阅包</Button>
+              </Tooltip>
+              <Tooltip title="从审阅包按编号补齐内容，重复导入不会生成副本">
+                <Button size="small" icon={<ImportOutlined />} onClick={openImport}>导入审阅包</Button>
+              </Tooltip>
               <Checkbox checked={revisionMode} onChange={(event) => setRevisionMode(event.target.checked)}>修订模式</Checkbox>
               <Tag color={dirty ? 'gold' : 'green'}>{dirty ? '有未保存修改' : '已保存'}</Tag>
             </Space>
@@ -301,6 +415,125 @@ export default function App() {
             </div>
           ))}
         </div>
+      </Modal>
+
+      <Modal
+        title={<span><ExportOutlined /> 导出审阅包</span>}
+        open={exportOpen} onCancel={() => setExportOpen(false)} width={720}
+        footer={<Space>
+          <Button icon={<ExportOutlined />} onClick={() => void copyPack()}>复制全部内容</Button>
+          <Button type="primary" icon={<FileTextOutlined />} onClick={downloadPack}>下载 .json 文件</Button>
+        </Space>}
+      >
+        <Alert type="info" showIcon style={{ marginBottom: 12 }} message={
+          <span>包含正文 {paragraphs.length} 段、意见 {comments.length} 条（含回复与合并关系）、历史版本 {versions.length} 个；格式版本 v{PACKAGE_VERSION}。复制或下载后发送给新电脑上的编辑/作者即可导入。</span>
+        } />
+        <Input.TextArea value={reviewPackText} readOnly autoSize={{ minRows: 10, maxRows: 16 }} className="pack-json" />
+      </Modal>
+
+      <Modal
+        title={<span><ImportOutlined /> 导入审阅包</span>}
+        open={importOpen} onCancel={() => setImportOpen(false)} width={860}
+        footer={importResult ? (
+          <Button type="primary" onClick={() => setImportOpen(false)}>完成</Button>
+        ) : (
+          <Space>
+            {!importPlan && <Button onClick={checkImport}>检查格式与版本号</Button>}
+            {importPlan && <Button type="primary" disabled={importPlan.conflicts.length > 0} onClick={confirmImport}>
+              按编号补齐{importPlan.added.length ? `（新增 ${importPlan.added.length} 条）` : ''}
+            </Button>}
+            <Button onClick={() => setImportOpen(false)}>{importPlan?.conflicts.length ? '关闭' : '取消'}</Button>
+          </Space>
+        )}
+      >
+        {!importResult && <>
+          {!importPlan && <>
+            <Space style={{ marginBottom: 8 }}>
+              <Upload accept=".json,application/json" showUploadList={false} beforeUpload={pickImportFile}>
+                <Button icon={<FileTextOutlined />}>选择 .json 文件</Button>
+              </Upload>
+              <span className="pack-hint">或直接粘贴对方复制的审阅包文本</span>
+            </Space>
+            <Input.TextArea value={importText} onChange={(event) => { setImportText(event.target.value); setImportErrors([]); setImportPlan(null); setImportPack(null) }} placeholder='{ "format": "sologsb-review-pack", ... }' autoSize={{ minRows: 6, maxRows: 12 }} className="pack-json" />
+            {importErrors.length > 0 && (
+              <Alert type="error" showIcon style={{ marginTop: 10 }} message="审阅包检查未通过，已停止导入"
+                description={<ul className="pack-error-list">{importErrors.map((item, index) => <li key={index}>{item}</li>)}</ul>} />
+            )}
+          </>}
+
+          {importPlan && <>
+            {importPlan.conflicts.length > 0 ? (
+              <Alert type="error" showIcon style={{ marginBottom: 12 }}
+                message={`发现 ${importPlan.conflicts.length} 个同编号但内容不同的条目，已停止，未写入任何内容`}
+                description="请先与对方核对下列两边内容，处理后重新导入；锁定状态、回复与合并关系均不会被覆盖。" />
+            ) : (
+              <Alert type="success" showIcon style={{ marginBottom: 12 }}
+                message={`格式与版本号检查通过（v${PACKAGE_VERSION}），将按编号补齐 ${importPlan.added.length} 条，已有编号 ${importPlan.skipped.length} 条保持不动`}
+                description="锁定、回复与合并关系按包内内容随新增条目保留；同一审阅包重复导入不会生成副本。" />
+            )}
+
+            <div className="pack-summary">
+              <div className="pack-column pack-added">
+                <b><PlusOutlined /> 新增（{importPlan.added.length}）</b>
+                {groupedItems(importPlan.added).map((group) => (
+                  <div key={group.kind} className="pack-group">
+                    <small>{kindLabel(group.kind)} · {group.entries.length}</small>
+                    {group.entries.map((item) => <Tag key={item.id} color="green" className="pack-tag">{item.label}</Tag>)}
+                  </div>
+                ))}
+                {!importPlan.added.length && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有需要新增的条目（可能已导入过）" />}
+              </div>
+              <div className="pack-column pack-skipped">
+                <b><CheckOutlined /> 跳过（{importPlan.skipped.length}）</b>
+                {groupedItems(importPlan.skipped).map((group) => (
+                  <div key={group.kind} className="pack-group">
+                    <small>{kindLabel(group.kind)} · {group.entries.length}</small>
+                    {group.entries.map((item) => (
+                      <Tag key={item.id} className={`pack-tag ${(item as SkippedItem).reason === 'different' ? 'conflict-tag' : ''}`}>
+                        {(item as SkippedItem).reason === 'different' ? '内容不同 · ' : '已存在 · '}{item.label}
+                      </Tag>
+                    ))}
+                  </div>
+                ))}
+                {!importPlan.skipped.length && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="全部条目都是新增" />}
+              </div>
+            </div>
+
+            {importPlan.conflicts.length > 0 && (
+              <div className="pack-conflicts">
+                <Divider orientation="left" plain>两边内容对照</Divider>
+                {importPlan.conflicts.map((conflict) => <ConflictCompare key={`${conflict.kind}-${conflict.id}`} conflict={conflict} />)}
+              </div>
+            )}
+          </>}
+        </>}
+
+        {importResult && <>
+          <Alert type="success" showIcon style={{ marginBottom: 12 }}
+            message={`导入完成：新增 ${importResult.added.length} 条，跳过 ${importResult.skipped.length} 条，未生成重复副本`} />
+          <div className="pack-summary">
+            <div className="pack-column pack-added">
+              <b><PlusOutlined /> 已新增（{importResult.added.length}）</b>
+              {groupedItems(importResult.added).map((group) => (
+                <div key={group.kind} className="pack-group">
+                  <small>{kindLabel(group.kind)} · {group.entries.length}</small>
+                  {group.entries.map((item) => <Tag key={item.id} color="green" className="pack-tag">{item.label}</Tag>)}
+                </div>
+              ))}
+              {!importResult.added.length && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="无新增条目" />}
+            </div>
+            <div className="pack-column pack-skipped">
+              <b><CheckOutlined /> 已跳过（{importResult.skipped.length}）</b>
+              {groupedItems(importResult.skipped).map((group) => (
+                <div key={group.kind} className="pack-group">
+                  <small>{kindLabel(group.kind)} · {group.entries.length}</small>
+                  {group.entries.map((item) => <Tag key={item.id} className="pack-tag">{item.label}</Tag>)}
+                </div>
+              ))}
+              {!importResult.skipped.length && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="无跳过条目" />}
+            </div>
+          </div>
+        </>}
       </Modal>
 
       <footer className="app-footer">

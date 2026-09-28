@@ -94,6 +94,25 @@ kbd { padding: 1px 4px; border: 1px solid #706158; border-radius: 3px; color: #f
 .version-row.changed { background: #fff9ec; }
 .composer { display: grid; gap: 8px; }
 .composer label { margin-top: 5px; color: #695e55; font-size: 11px; font-weight: 700; }
+.pack-json { font-family: "SFMono-Regular", Consolas, "Courier New", monospace; font-size: 11px; line-height: 1.6; background: #f7f4ef; }
+.pack-hint { color: #96887d; font-size: 11px; }
+.pack-error-list { margin: 0; padding-left: 18px; }
+.pack-error-list li { margin: 2px 0; }
+.pack-summary { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.pack-column { padding: 10px 12px; border: 1px solid #e3dcd3; border-radius: 8px; background: #fffefa; max-height: 300px; overflow: auto; }
+.pack-column > b { display: block; margin-bottom: 8px; font-size: 12px; }
+.pack-added { border-color: #b7d6c4; background: #f4faf6; }
+.pack-skipped { border-color: #ddd4c9; background: #faf7f2; }
+.pack-group { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; margin-bottom: 8px; }
+.pack-group small { flex-basis: 100%; color: #8b7d72; font-size: 10px; font-weight: 700; }
+.pack-tag { white-space: normal; height: auto; line-height: 1.5; margin-inline-end: 0; padding: 1px 7px; }
+.conflict-tag { color: #b04a40 !important; border-color: #e3b6b1 !important; background: #fdf1f0 !important; }
+.pack-conflicts { margin-top: 6px; }
+.pack-conflict-item { margin-bottom: 12px; }
+.pack-conflict-title { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; font-size: 12px; font-weight: 700; color: #5a4f46; }
+.pack-conflict-item .conflict-content { grid-template-columns: 1fr 1fr; }
+.pack-conflict-item .conflict-content > div { white-space: pre-line; }
+.pack-conflict-item .conflict-content small { display: block; margin: 2px 0; color: #96887d; font-size: 10px; }
 .app-footer { position: fixed; left: 0; right: 0; bottom: 0; z-index: 20; height: 42px; display: flex; align-items: center; justify-content: space-between; padding: 0 18px; color: #a99d92; background: #29241f; font-size: 10px; }
 @media (max-width: 1220px) {
   .workspace { grid-template-columns: 210px minmax(540px, 1fr) 352px; }
@@ -111,5 +130,6 @@ kbd { padding: 1px 4px; border: 1px solid #706158; border-radius: 3px; color: #f
   .document-panel, .comments-panel { overflow: visible; border: 0; }
   .paper-sheet { padding: 24px 18px 50px; }
   .comments-panel > .keyboard-hint { position: static; width: auto; }
-  .conflict-content { grid-template-columns: 1fr; }
+  .conflict-content, .pack-conflict-item .conflict-content { grid-template-columns: 1fr; }
+  .pack-summary { grid-template-columns: 1fr; }
 }
