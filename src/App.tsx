@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   ArrowLeftOutlined, ArrowRightOutlined, BranchesOutlined, CheckOutlined, CloseOutlined,
-  CommentOutlined, DiffOutlined, DeleteOutlined, FileDoneOutlined, FileTextOutlined,
-  HistoryOutlined, LockOutlined, MenuFoldOutlined, MessageOutlined, PlusOutlined,
-  RedoOutlined, SaveOutlined, SendOutlined, SwapOutlined, UndoOutlined, UnlockOutlined, UserSwitchOutlined,
+  CommentOutlined, CopyOutlined, DiffOutlined, DeleteOutlined, DownloadOutlined, ExportOutlined,
+  FileDoneOutlined, FileTextOutlined, HistoryOutlined, ImportOutlined, LockOutlined, MenuFoldOutlined,
+  MessageOutlined, MinusCircleOutlined, PlusCircleOutlined, PlusOutlined, RedoOutlined, SaveOutlined, SendOutlined,
+  SwapOutlined, UndoOutlined, UnlockOutlined, UploadOutlined, UserSwitchOutlined, WarningOutlined,
 } from '@ant-design/icons'
-import { Alert, Badge, Button, Card, Checkbox, Divider, Empty, Input, Modal, Radio, Segmented, Select, Space, Tag, Tooltip, message } from 'antd'
+import { Alert, Badge, Button, Card, Checkbox, Divider, Empty, Input, Modal, Radio, Segmented, Select, Space, Tag, Tooltip, Upload, message } from 'antd'
 import { submitRemotePatch } from './services/mockApi'
+import { buildReviewPackage, entityLabel, kindLabel, parseReviewPackage, planImport, serializeReviewPackage } from './services/reviewPackage'
+import type { ImportPlan, PlanItem } from './services/reviewPackage'
 import { useReviewStore } from './store/review'
 import type { Comment, CommentType, Paragraph, Role } from './types'
 
@@ -23,7 +26,7 @@ export default function App() {
     role, paragraphs, comments, versions, selectedParagraphId, commentFilter, revisionMode, dirty, conflicts,
     setRole, selectParagraph, setCommentFilter, setRevisionMode, updateParagraph, addComment, replyComment,
     resolveSuggestion, mergeComment, toggleLock, createVersion, addConflict, resolveConflict, dismissConflict,
-    undo, redo, save, resetDemo,
+    undo, redo, save, resetDemo, applyImportPlan,
   } = useReviewStore()
   const [composerOpen, setComposerOpen] = useState(false)
   const [commentType, setCommentType] = useState<CommentType>('comment')
@@ -35,6 +38,13 @@ export default function App() {
   const [versionA, setVersionA] = useState(versions[1]?.id ?? versions[0]?.id)
   const [versionB, setVersionB] = useState(versions[0]?.id)
   const [versionLabel, setVersionLabel] = useState('')
+  const [packageModal, setPackageModal] = useState<'export' | 'import' | null>(null)
+  const [exportText, setExportText] = useState('')
+  const [importText, setImportText] = useState('')
+  const [importErrors, setImportErrors] = useState<string[]>([])
+  const [importPlan, setImportPlan] = useState<ImportPlan | null>(null)
+  const [importResult, setImportResult] = useState<{ added: PlanItem[]; skipped: PlanItem[] } | null>(null)
+  const [importBusy, setImportBusy] = useState(false)
 
   const selected = paragraphs.find((paragraph) => paragraph.id === selectedParagraphId) ?? paragraphs[0]
   const sections = useMemo(() => Array.from(new Set(paragraphs.map((paragraph) => paragraph.section))), [paragraphs])
@@ -121,6 +131,93 @@ export default function App() {
   const comparedB = versions.find((version) => version.id === versionB)
   const comparedRows = comparedA && comparedB ? comparedA.paragraphs.map((paragraph, index) => ({ a: paragraph, b: comparedB.paragraphs[index] })) : []
 
+  const openExport = () => {
+    const pkg = buildReviewPackage({ paragraphs, comments, versions })
+    setExportText(serializeReviewPackage(pkg))
+    setPackageModal('export')
+  }
+  const openImport = () => {
+    setImportText(''); setImportErrors([]); setImportPlan(null); setImportResult(null)
+    setPackageModal('import')
+  }
+  const closePackageModal = () => setPackageModal(null)
+  const fallbackCopy = async (text: string) => {
+    const area = document.createElement('textarea')
+    area.value = text
+    area.style.position = 'fixed'
+    area.style.opacity = '0'
+    document.body.appendChild(area)
+    area.select()
+    try { document.execCommand('copy') } finally { document.body.removeChild(area) }
+  }
+  const handleCopyExport = async () => {
+    try {
+      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(exportText)
+      else await fallbackCopy(exportText)
+      message.success('审阅包 JSON 已复制到剪贴板')
+    } catch {
+      await fallbackCopy(exportText)
+      message.success('审阅包 JSON 已复制（兼容模式）')
+    }
+  }
+  const handleDownloadExport = () => {
+    const blob = new Blob([exportText], { type: 'application/json;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `review-package-${new Date().toISOString().slice(0, 10)}.json`
+    link.click()
+    URL.revokeObjectURL(url)
+  }
+  const handleImportFile = async (file: File) => {
+    setImportText(await file.text())
+    setImportErrors([]); setImportPlan(null); setImportResult(null)
+    message.info(`已读取文件 ${file.name}，请点击“检查格式并预览”`)
+    return false
+  }
+  const currentRefs = {
+    paragraphs: paragraphs.map((item) => ({ id: item.id })),
+    comments: comments.map((item) => ({ id: item.id })),
+  }
+  const checkImport = () => {
+    setImportBusy(true)
+    try {
+      const parsed = parseReviewPackage(importText, currentRefs)
+      if (!parsed.ok || !parsed.pkg) {
+        setImportErrors(parsed.errors)
+        setImportPlan(null)
+        message.error('审阅包格式或版本检查未通过，已停止')
+        return
+      }
+      const plan = planImport({ paragraphs, comments, versions }, parsed.pkg)
+      const conflictCount = plan.items.filter((item) => item.decision === 'conflict').length
+      setImportErrors([])
+      setImportPlan(plan)
+      if (conflictCount > 0) message.error(`发现 ${conflictCount} 个同编号内容冲突，导入已停止，请核对两边内容`)
+      else message.success('格式与版本号检查通过，请确认后补齐')
+    } finally {
+      setImportBusy(false)
+    }
+  }
+  const confirmImport = () => {
+    if (!importPlan) return
+    const result = applyImportPlan(importPlan)
+    const added = importPlan.items.filter((item) => item.decision === 'add')
+    const skipped = importPlan.items.filter((item) => item.decision !== 'add')
+    setImportResult({ added, skipped })
+    setImportPlan(null)
+    message.success(`导入完成：新增 ${result.added} 条，跳过 ${result.skipped} 条`)
+  }
+  const conflictItems = importPlan?.items.filter((item) => item.decision === 'conflict') ?? []
+  const addedPreview = importPlan?.items.filter((item) => item.decision === 'add') ?? []
+  const skippedPreview = importPlan?.items.filter((item) => item.decision === 'skip-identical') ?? []
+  const renderPlanItem = (item: PlanItem) => (
+    <li key={`${item.kind}-${item.id}`}>
+      <Tag color={item.kind === 'paragraph' ? 'geekblue' : item.kind === 'comment' ? 'gold' : 'purple'}>{kindLabel[item.kind]}</Tag>
+      {entityLabel(item.kind, item.incoming)}
+    </li>
+  )
+
   return (
     <div className="review-app">
       <header className="app-header">
@@ -136,6 +233,8 @@ export default function App() {
           <Button icon={<UndoOutlined />} disabled={!useReviewStore.getState().past.length} onClick={undo} />
           <Button icon={<RedoOutlined />} disabled={!useReviewStore.getState().future.length} onClick={redo} />
           <Button danger={conflicts.length > 0} icon={<SwapOutlined />} onClick={() => void handleMockConflict()}>模拟冲突</Button>
+          <Tooltip title="导出正文、意见、回复、合并关系与历史版本为可复制的审阅包"><Button icon={<ExportOutlined />} onClick={openExport}>导出审阅包</Button></Tooltip>
+          <Tooltip title="粘贴或选择审阅包 JSON，按编号补齐到本机"><Button icon={<ImportOutlined />} onClick={openImport}>导入审阅包</Button></Tooltip>
         </Space>
       </header>
 
@@ -301,6 +400,122 @@ export default function App() {
             </div>
           ))}
         </div>
+      </Modal>
+
+      <Modal
+        title="导出审阅包"
+        open={packageModal === 'export'}
+        onCancel={closePackageModal}
+        width={720}
+        footer={<Space>
+          <Button icon={<CopyOutlined />} onClick={() => void handleCopyExport()}>复制 JSON</Button>
+          <Button type="primary" icon={<DownloadOutlined />} onClick={handleDownloadExport}>下载文件</Button>
+          <Button onClick={closePackageModal}>关闭</Button>
+        </Space>}
+      >
+        <Alert type="info" showIcon className="package-alert"
+          message="审阅包包含正文、意见（含回复与合并关系）和历史版本，可复制给换电脑的作者或交接的编辑；在另一台电脑上用“导入审阅包”按编号补齐。" />
+        <Space className="package-stats">
+          <Tag color="geekblue">正文 {paragraphs.length} 段</Tag>
+          <Tag color="gold">意见 {comments.length} 条</Tag>
+          <Tag>{comments.reduce((total, comment) => total + comment.replies.length, 0)} 条回复</Tag>
+          <Tag color="purple">历史版本 {versions.length} 个</Tag>
+        </Space>
+        <Input.TextArea className="package-json" value={exportText} readOnly autoSize={{ minRows: 12, maxRows: 18 }} onFocus={(event) => event.target.select()} />
+      </Modal>
+
+      <Modal
+        title="导入审阅包"
+        open={packageModal === 'import'}
+        onCancel={closePackageModal}
+        width={780}
+        className="package-import-modal"
+        footer={importResult ? (
+          <Space>
+            <Button icon={<ImportOutlined />} onClick={openImport}>再导入一个</Button>
+            <Button type="primary" onClick={closePackageModal}>完成</Button>
+          </Space>
+        ) : (
+          <Space>
+            <Button onClick={closePackageModal}>取消</Button>
+            <Button loading={importBusy} icon={<UploadOutlined />} onClick={checkImport} disabled={!importText.trim()}>检查格式并预览</Button>
+            <Button type="primary" icon={<CheckOutlined />} onClick={confirmImport}
+              disabled={!importPlan || conflictItems.length > 0}>
+              确认按编号补齐{importPlan && conflictItems.length === 0 ? `（新增 ${addedPreview.length} · 跳过 ${skippedPreview.length}）` : ''}
+            </Button>
+          </Space>
+        )}
+      >
+        {importResult ? (
+          <div className="package-body">
+            <Alert type="success" showIcon message={`导入完成：新增 ${importResult.added.length} 条，跳过 ${importResult.skipped.length} 条；锁定、回复与合并关系均随条目保留`} />
+            <div>
+              <h5><PlusCircleOutlined className="text-success" /> 新增条目（{importResult.added.length}）</h5>
+              {importResult.added.length
+                ? <ul className="package-item-list">{importResult.added.map(renderPlanItem)}</ul>
+                : <p className="package-empty">没有新增条目——该审阅包的内容本机已全部具备，重复导入不会生成副本。</p>}
+            </div>
+            <div>
+              <h5><MinusCircleOutlined className="text-muted" /> 跳过条目（{importResult.skipped.length}）</h5>
+              {importResult.skipped.length
+                ? <ul className="package-item-list">{importResult.skipped.map(renderPlanItem)}</ul>
+                : <p className="package-empty">无</p>}
+            </div>
+          </div>
+        ) : (
+          <div className="package-body">
+            <Alert type="info" showIcon message="先检查格式与版本号；编号相同但内容不同的条目会同时列出两边并停止导入，确认后仅补齐本机缺少的编号，已有条目（含锁定、回复、合并关系）原样保留。" />
+            <Space>
+              <Upload accept=".json,application/json" showUploadList={false} beforeUpload={(file) => void handleImportFile(file)}>
+                <Button icon={<UploadOutlined />}>选择审阅包文件</Button>
+              </Upload>
+              <span className="package-hint">也可以直接把审阅包 JSON 粘贴到下面</span>
+            </Space>
+            <Input.TextArea className="package-json" value={importText} autoSize={{ minRows: 7, maxRows: 12 }}
+              placeholder='{"format":"sologsb-1002-review-package", ...}'
+              onChange={(event) => { setImportText(event.target.value); setImportErrors([]); setImportPlan(null) }} />
+            {importErrors.length > 0 && (
+              <Alert type="error" showIcon icon={<WarningOutlined />}
+                message={`检查未通过，已停止（${importErrors.length} 项）`}
+                description={<ul className="package-error-list">{importErrors.map((error, index) => <li key={index}>{error}</li>)}</ul>} />
+            )}
+            {importPlan && conflictItems.length > 0 && (
+              <div>
+                <Alert type="error" showIcon icon={<WarningOutlined />}
+                  message={`发现 ${conflictItems.length} 个同编号内容冲突，导入已停止`}
+                  description="下列编号两边内容不同（锁定状态、回复或合并关系可能也有差异）。为避免覆盖本机数据，请先人工核对并统一后重新导入；冲突条目不会被写入。" />
+                <div className="package-conflicts">
+                  {conflictItems.map((item) => (
+                    <div key={`${item.kind}-${item.id}`} className="package-conflict">
+                      <h5><WarningOutlined /> {kindLabel[item.kind]} · {item.id}</h5>
+                      <div className="package-conflict-grid">
+                        <div><small>本机</small><pre>{JSON.stringify(item.local, null, 2)}</pre></div>
+                        <div><small>审阅包</small><pre>{JSON.stringify(item.incoming, null, 2)}</pre></div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {importPlan && conflictItems.length === 0 && (
+              <div className="package-summary">
+                <Alert type="success" showIcon message={`检查通过：将新增 ${addedPreview.length} 条，跳过 ${skippedPreview.length} 条；编号一致的条目不做改动。`} />
+                <div>
+                  <h5><PlusCircleOutlined className="text-success" /> 新增（{addedPreview.length}）</h5>
+                  {addedPreview.length
+                    ? <ul className="package-item-list">{addedPreview.map(renderPlanItem)}</ul>
+                    : <p className="package-empty">无新增条目</p>}
+                </div>
+                <div>
+                  <h5><MinusCircleOutlined className="text-muted" /> 跳过（{skippedPreview.length}）</h5>
+                  {skippedPreview.length
+                    ? <ul className="package-item-list">{skippedPreview.map(renderPlanItem)}</ul>
+                    : <p className="package-empty">无</p>}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </Modal>
 
       <footer className="app-footer">

@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type { Comment, EditConflict, Paragraph, Reply, Role, Version } from '../types'
+import type { ImportPlan } from '../services/reviewPackage'
 
 const DRAFT_KEY = 'sologsb-1002-draft-v1'
 const id = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
@@ -65,6 +66,7 @@ interface ReviewState {
   redo: () => void
   save: () => void
   resetDemo: () => void
+  applyImportPlan: (plan: ImportPlan) => { added: number; skipped: number }
 }
 
 export const useReviewStore = create<ReviewState>((set, get) => {
@@ -170,6 +172,42 @@ export const useReviewStore = create<ReviewState>((set, get) => {
       localStorage.removeItem(DRAFT_KEY)
       set({ paragraphs: clone(baseParagraphs), comments: clone(baseComments), versions: clone(initialVersions), conflicts: [], past: [], future: [], dirty: false })
       persistDraft(baseParagraphs, baseComments, initialVersions)
+    },
+    applyImportPlan: (plan) => {
+      let added = 0
+      let skipped = 0
+      record((state) => {
+        const paragraphIds = new Set(state.paragraphs.map((item) => item.id))
+        const commentIds = new Set(state.comments.map((item) => item.id))
+        const versionIds = new Set(state.versions.map((item) => item.id))
+        const paragraphs = [...state.paragraphs]
+        const comments = [...state.comments]
+        const versions = [...state.versions]
+        for (const item of plan.items) {
+          if (item.decision === 'add') {
+            if (item.kind === 'paragraph' && !paragraphIds.has(item.id)) {
+              paragraphs.push(item.incoming as Paragraph)
+              paragraphIds.add(item.id)
+              added += 1
+            } else if (item.kind === 'comment' && !commentIds.has(item.id)) {
+              comments.push(item.incoming as Comment)
+              commentIds.add(item.id)
+              added += 1
+            } else if (item.kind === 'version' && !versionIds.has(item.id)) {
+              versions.push(item.incoming as Version)
+              versionIds.add(item.id)
+              added += 1
+            } else {
+              skipped += 1
+            }
+          } else {
+            // 编号相同：内容一致直接跳过；内容冲突已在确认前列出，本地条目原样保留
+            skipped += 1
+          }
+        }
+        return { paragraphs, comments, versions }
+      })
+      return { added, skipped }
     },
   }
 })

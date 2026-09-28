@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "check:package": "esbuild scripts/check-review-package.mts --bundle --platform=node --format=esm --outfile=node_modules/.cache/check-review-package.mjs && node node_modules/.cache/check-review-package.mjs"
   },
   "dependencies": {
     "@ant-design/icons": "^6.0.0",
